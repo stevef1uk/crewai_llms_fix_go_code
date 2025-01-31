@@ -33,7 +33,7 @@ The initial Go code should be ok so the LLMs won't be called. Edit the code that
 
 A backup of the source file is kept in case it is corrupted as LLMs sometimes have minds of their own.
 
-NO WARRENTY or FOT FOR PURPOSE Claims are being made. Use at your own risk!
+NO WARRENTY or FIT FOR PURPOSE Claims are being made. Use at your own risk!
 
 Roadmap: To automatically generate unit tests for the Go source file
 
