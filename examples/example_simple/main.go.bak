@@ -5,7 +5,7 @@ import "fmt"
 const message = "Hello, World!"
 
 func main() {
-    greeting() // Call the greet function from main
+    greeting()
 }
 
 func greeting() {

@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.llms import Ollama
+from langchain_openai import ChatOpenAI
 from crewai import Agent, Task, Crew, Process
 import re
 
@@ -45,6 +46,7 @@ class GoRunner:
         return os.path.dirname(os.path.abspath(__file__))
         
     def _load_config(self, config_path: str) -> GoConfig:
+        """Loads the configuration from the specified YAML file."""
         with open(config_path, 'r') as f:
             config_data = yaml.safe_load(f)
             return GoConfig(
@@ -470,14 +472,15 @@ class GoRunner:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python script.py <config.yaml> [--llm <gemini|ollama>] [--ollama-host <host_url>] [--ollama-model <model_name>]")
+        print("Usage: python script.py <config.yaml> [--llm <gemini|ollama|openai>] [--ollama-host <host_url>] [--ollama-model <model_name>] [--openai-model <model_name>]")
         sys.exit(1)
     
     parser = argparse.ArgumentParser(description='Debug Go code using AI agents')
     parser.add_argument('config', help='Path to YAML configuration file')
-    parser.add_argument('--llm', choices=['gemini', 'ollama'], default='gemini', help='LLM provider to use')
+    parser.add_argument('--llm', choices=['gemini', 'ollama', 'openai'], default='gemini', help='LLM provider to use')
     parser.add_argument('--ollama-host', default='http://localhost:11434', help='Ollama host URL')
     parser.add_argument('--ollama-model', default='mistral', help='Ollama model name')
+    parser.add_argument('--openai-model', default='gpt-3.5-turbo', help='OpenAI model name')
     
     args = parser.parse_args()
     
@@ -526,6 +529,25 @@ def main():
         def call(self, prompt: str, **kwargs) -> str:
             return self.llm.invoke(prompt)
 
+    class OpenAILLM(LLM):
+        def __init__(self, model, temperature=0.7, verbose=False, openai_api_key=None):
+             super().__init__(
+                model=model,
+                temperature=temperature
+            )
+             self.llm = ChatOpenAI(
+                model=model,
+                temperature=temperature,
+                verbose=verbose,
+                openai_api_key=openai_api_key,
+            )
+             self.prompt = ChatPromptTemplate.from_messages([
+                ("user", "{prompt}")
+            ])
+
+        def call(self, prompt: str, **kwargs) -> str:
+           return self.llm.invoke(self.prompt.format_messages(prompt=prompt)).content
+
     if args.llm == 'gemini':
         llm = GeminiLLM(
             model='models/gemini-pro',
@@ -533,13 +555,22 @@ def main():
             temperature=0.99,
             google_api_key=os.getenv('GOOGLE_API_KEY')
         )
-    else:  # ollama
+    elif args.llm == 'ollama':
         llm = OllamaLLM(
             model=args.ollama_model,
             base_url=args.ollama_host,
             temperature=0.99,
             verbose=True
         )
+    elif args.llm == 'openai':
+        llm = OpenAILLM(
+            model=args.openai_model,
+            temperature=0.99,
+            verbose=True,
+            openai_api_key=os.getenv('OPENAI_API_KEY')
+        )
+    else:
+        raise ValueError(f"Invalid LLM provider: {args.llm}")
     
     config_path = args.config
     runner = GoRunner(config_path, llm)
@@ -558,4 +589,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
