@@ -1,0 +1,29 @@
+Example code to use CrewAI with an LLM to fix python code
+
+I suggest a python venv is used to run this code.
+
+You will need to create a .env file containing the keys needed for the two Foundations LLMs supported:
+
+GOOGLE_API_KEY=
+OPENAI_API_KEY
+
+The example directory has 3 example configuration files to show this running against 3 differnet types of Go projects:
+
+example_simple
+example_server
+example_modules
+
+You can run all of them with: 
+
+python  main_fix_only.py examples/config_simple.yaml
+
+python  main_fix_only.py examples/config_server.yaml
+
+python  main_fix_only.py examples/config_modules.yaml
+
+The initial Go code should be ok so the LLMs won't be called. Edit the code that has been configured to be repaired and see what happens.
+
+A backup of the source file is kept in case it is corrupted as LLMs sometimes have minds of their own.
+
+NO WARRENTY or FOT FOR PURPOSE Claims are being made. Use at your own risk!
+

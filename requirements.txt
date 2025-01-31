@@ -1,0 +1,10 @@
+crewai
+pyyaml
+python-dotenv
+langchain-google-genai
+langchain-core
+langchain-community
+langchain-experimental
+langchain-openai
+python-dotenv
+

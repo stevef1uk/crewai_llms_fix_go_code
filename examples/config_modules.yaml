@@ -1,0 +1,6 @@
+working_directory: ./examples/example_modules # This path should point to the directory where your go.mod file is
+command: go run main.go # Specify your main file to run
+fix_file: adder/adder.go
+timeout_seconds: 30
+max_iterations: 4
+environment: # optional environment variables
