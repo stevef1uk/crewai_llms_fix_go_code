@@ -39,9 +39,9 @@ The initial Go code should be ok so the LLMs won't be called. Edit the code that
 A backup of the source file is kept in case it is corrupted as LLMs sometimes have minds of their own.
 
 The test code genaerator is run in a very similar madder with the same LLM options supported, however, only OpenAI seems to be able
-to reasonably reliably generate working unit tests. Gemini may take  few attempts and Ollama failed to complete the task on my set-up.
+to reasonably reliably generate working unit tests. Gemini may take a few attempts and Ollama failed to complete the task on my set-up.
 
-python main_test_gen.py -v ./examples/config_simple.yaml --llm openai --openai-model gpt-3.5-turbo
+python main_test_gen.py -vv ./examples/config_simple.yaml --llm openai --openai-model gpt-3.5-turbo
 
 It sometimes take the LLMs a while to process this so please be patient.
 
