@@ -46,6 +46,3 @@ python main_test_gen.py -vv ./examples/config_simple.yaml --llm openai --openai-
 It sometimes take the LLMs a while to process this so please be patient.
 
 NO WARRENTY or FIT FOR PURPOSE Claims are being made. Use at your own risk!
-
-Roadmap: To automatically generate unit tests for the Go source file
-
