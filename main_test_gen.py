@@ -199,19 +199,38 @@ class TestGenerator:
                 except Exception as e:
                     logger.warning(f"Failed to remove test binary {binary}: {e}")
 
+    def _get_package_name(self, file_path: str) -> str:
+        """Extracts the package name from a Go source file"""
+        try:
+            with open(file_path, 'r') as f:
+                for line in f:
+                    if line.strip().startswith('package '):
+                        return line.split()[1].strip()
+        except Exception as e:
+            logger.error(f"Failed to read package name from {file_path}: {e}")
+        return "main"  # Default to main if we can't determine package
+
     def _validate_test_code(self, test_path: str) -> bool:
         """Validate the test code and handle dependencies"""
         test_dir = self.config.test_working_directory
+        source_path = os.path.join(self.config.working_directory, self.config.source_file)
+        source_dir = os.path.dirname(source_path)
         
         try:
             # Check if we're in a module structure
-            has_module = os.path.exists(os.path.join(test_dir, "go.mod"))
+            has_module = os.path.exists(os.path.join(source_dir, "go.mod"))
+            logger.debug(f"Module detected: {has_module} in {source_dir}")
+
+            # Get the package name from source file
+            package_name = self._get_package_name(source_path)
+            logger.debug(f"Source package name: {package_name}")
             
             # Environment setup
             env = os.environ.copy()
             if has_module:
                 env['GO111MODULE'] = 'on'
                 env['GOWORK'] = 'off'
+                test_dir = source_dir  # Use source directory for module tests
             else:
                 env['GO111MODULE'] = 'off'
                 
@@ -226,11 +245,6 @@ class TestGenerator:
             )
             
             if process.returncode != 0:
-                # Check if it's a build error
-                if "[build failed]" in process.stderr or "build failed" in process.stderr:
-                    logger.error(f"Build failed in {test_dir}:\n{process.stderr}")
-                    return False
-                    
                 logger.debug(f"Initial build failed: {process.stderr}")
                 if has_module:
                     logger.info(f"Attempting to get dependencies in {test_dir}...")
@@ -267,7 +281,7 @@ class TestGenerator:
             # Ensure cleanup even on exception
             self._cleanup_test_binaries(test_dir)
             return False
-
+    
     def _run_tests(self) -> tuple[bool, str]:
         """Run the unit tests and capture output"""
         test_dir = self.config.test_working_directory

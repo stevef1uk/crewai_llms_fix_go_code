@@ -15,18 +15,18 @@ description: |
     2. Include both positive and negative test cases
     3. Follow Go testing best practices
     4. Use table-driven tests where appropriate
-    5. Use the same package as the source code (package main, not main_test)
+    5. Use same package as source code
     6. Mock external dependencies when necessary
     7. Have clear test names and descriptions
 
     IMPORTANT: 
     1. Return ONLY the complete Go test code
     2. Do not include any markdown formatting or explanatory text
-    3. Use the EXACT same package name as the source code (not _test variant)
-    4. Always include required standard library imports (os, io, etc.) PROVIDED THAT THEY ARE USED by the test code
-    5. Keep test file in the same package to access unexported functions
+    3. Use EXACTLY the same package name as the source code
+    4. Import ONLY packages that are actually used in the tests
+    5. Keep test file in the same package as source code
     6. Remove any backticks or markdown code block markers
     7. Do not add imports for the package under test
-    8. Keep the test code simple and do not over complicate things
+    8. Remove any unused imports to avoid compilation errors
 
 expected_output: "Complete Go test code ready to be written to a file"
