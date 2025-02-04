@@ -66,9 +66,7 @@ class TestGenerator:
             raise
 
     def _create_test_generator_task(self, source_code: str) -> Task:
-        """Create a task for generating unit tests"""
         agent_config = self._load_agent_config('config/test_generator_agent.yaml')
-        
         return Task(
             description=agent_config['description'].format(source_code=source_code),
             expected_output=agent_config['expected_output'],
@@ -154,101 +152,59 @@ class TestGenerator:
         
         code = code.replace('```go', '').replace('```', '')
         return code.strip()
-
-    def _validate_test_code(self, test_path: str) -> bool:
-        """Validate the generated test code compiles"""
-        test_binary = os.path.join(self.config.working_directory, "main.test")
+        package = "main"
+        module_path = "local"
         try:
-            # Ensure we're in a module, but don't try to tidy it
-            if not os.path.exists(os.path.join(self.config.working_directory, "go.mod")):
-                logger.info("Initializing go module...")
-                module_path = "test/local"  # Use a simple local module path
+            with open(source_path, 'r') as f:
+                content = f.read()
+                # Extract package
+                for line in content.split('\n'):
+                    if line.strip().startswith('package '):
+                        package = line.split()[1].strip()
+                        break
+                # Use package name as module path
+                module_path = package if package != "main" else "local"
+        except Exception as e:
+            logger.error(f"Failed to read package info: {str(e)}")
+        return package, module_path
+    
+    def _validate_test_code(self, test_path: str) -> bool:
+        source_path = os.path.join(self.config.working_directory, self.config.source_file)
+        test_binary = test_path + ".test"
+        cwd = os.path.dirname(source_path)
+        
+        try:
+            with open(source_path, 'r') as f:
+                for line in f:
+                    if line.startswith('package '):
+                        module_name = line.split()[1].strip()
+                        break
+
+            mod_path = os.path.join(cwd, "go.mod")
+            if not os.path.exists(mod_path):
                 init_process = subprocess.run(
-                    ['go', 'mod', 'init', module_path],
+                    ['go', 'mod', 'init', module_name],
                     capture_output=True,
                     text=True,
-                    cwd=self.config.working_directory
+                    cwd=cwd
                 )
                 if init_process.returncode != 0:
                     logger.error(f"Failed to initialize go module:\n{init_process.stderr}")
                     return False
 
-            # Skip go mod tidy - we don't need external dependencies for basic tests
-            logger.debug("Skipping go mod tidy for local package tests")
-
-            # Try to compile the tests
-            process = subprocess.run(
-                ['go', 'test', '-c'],
-                capture_output=True,
-                text=True,
-                cwd=self.config.working_directory
-            )
-
-            # Clean up test binary regardless of compilation result
+            process = subprocess.run(['go', 'test', '-c'], capture_output=True, text=True, cwd=cwd)
             if os.path.exists(test_binary):
-                try:
-                    os.remove(test_binary)
-                    logger.debug(f"Removed test binary: {test_binary}")
-                except Exception as e:
-                    logger.warning(f"Failed to remove test binary {test_binary}: {str(e)}")
-
-            if process.returncode == 0:
-                return True
-            logger.error(f"Test compilation failed:\n{process.stderr}")
-            return False
+                os.remove(test_binary)
+                
+            return process.returncode == 0
 
         except Exception as e:
             logger.error(f"Error validating test code: {str(e)}")
             if os.path.exists(test_binary):
                 try:
                     os.remove(test_binary)
-                    logger.debug(f"Removed test binary after error: {test_binary}")
-                except Exception as cleanup_error:
-                    logger.warning(f"Failed to remove test binary {test_binary}: {str(cleanup_error)}")
-            return False
-
-            # Skip go mod tidy - we don't need external dependencies for basic tests
-            logger.debug("Skipping go mod tidy for local package tests")
-            
-            try:
-                # Try to compile the tests
-                process = subprocess.run(
-                    ['go', 'test', '-c'],
-                    capture_output=True,
-                    text=True,
-                    cwd=self.config.working_directory
-                )
-                
-                # Always attempt to remove the test binary
-                if os.path.exists(test_binary):
-                    try:
-                        os.remove(test_binary)
-                        logger.debug(f"Removed test binary: {test_binary}")
-                    except Exception as e:
-                        logger.warning(f"Failed to remove test binary {test_binary}: {str(e)}")
-                
-                if process.returncode == 0:
-                    return True
-                logger.error(f"Test compilation failed:\n{process.stderr}")
-                return False
-                
-            except Exception as e:
-                logger.error(f"Error validating test code: {str(e)}")
-                return False
-
-            # Try to compile the tests
-            process = subprocess.run(
-                ['go', 'test', '-c'],
-                capture_output=True,
-                text=True,
-                cwd=self.config.working_directory
-            )
-            if process.returncode == 0:
-                return True
-            logger.error(f"Test compilation failed:\n{process.stderr}")
-            return False
-        except Exception as e:
-            logger.error(f"Error validating test code: {str(e)}")
+                except Exception:
+                    pass
             return False
 
     def _create_test_fixer_task(self, source_code: str, test_code: str, build_errors: str) -> Task:
@@ -335,7 +291,7 @@ class TestGenerator:
         """Run the unit tests and capture output"""
         try:
             process = subprocess.run(
-                ['go', 'test', '-v', './...'],
+                ['go', 'test', '-v'],
                 capture_output=True,
                 text=True,
                 cwd=self.config.working_directory,
@@ -351,6 +307,7 @@ class TestGenerator:
         """Main method to generate and run tests"""
         # Read source code
         source_path = os.path.join(self.config.working_directory, self.config.source_file)
+       
         try:
             with open(source_path, 'r') as f:
                 source_code = f.read()

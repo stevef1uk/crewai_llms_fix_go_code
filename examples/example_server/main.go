@@ -5,8 +5,12 @@ import (
     "net/http"
 )
 
+func getGreeting() string {
+   return "Hello, World!"
+}
+
 func handler(w http.ResponseWriter, r *http.Request) {
-    fmt.Fprintf(w, "Hello, World!")
+    fmt.Fprintf(w, getGreeting())
 }
 
 func main() {
