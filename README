@@ -44,7 +44,7 @@ to reasonably reliably generate working unit tests. Gemini may take a few attemp
 python main_test_gen.py -vv ./examples/config_simple.yaml --llm openai --openai-model gpt-3.5-turbo
 python main_test_gen.py -vv ./examples/config_modules.yaml --llm openai --openai-model gpt-3.5-turbo
 
-Not: For Go code using modules where the code to have the test written for it is not in the current wporking dorectory the config files has an extra path added e.g.
+Note: For Go code using modules where the code to have the test written for it is not in the current working directory the config files has an extra path added e.g.
 
 working_directory: ./examples/example_modules
 test_working_directory: ./examples/example_modules/adder
