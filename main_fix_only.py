@@ -45,19 +45,25 @@ class GoRunner:
         """Get the directory of the current script."""
         return os.path.dirname(os.path.abspath(__file__))
         
-    def _load_config(self, config_path: str) -> GoConfig:
+    def _load_config(self, config_path: str) -> TestConfig:
         """Loads the configuration from the specified YAML file."""
         with open(config_path, 'r') as f:
             config_data = yaml.safe_load(f)
-            return GoConfig(
+            source_file = config_data.get('source_file') or config_data.get('fix_file')
+            if not source_file:
+                raise ValueError("No source_file specified in config")
+                
+            return TestConfig(
                 working_directory=config_data['working_directory'],
-                command=config_data['command'],
+                source_file=source_file,
+                test_file=config_data.get('test_file'),
                 timeout_seconds=config_data.get('timeout_seconds', 30),
                 max_iterations=config_data.get('max_iterations', 3),
-                fix_file=config_data.get('fix_file'),
-                environment=config_data.get('environment', {})
+                environment=config_data.get('environment', {}),
+                test_working_directory=config_data.get('test_working_directory')  # This will default to working_directory
             )
-    
+
+
     def _load_agent_config(self, config_path: str) -> dict:
         """Load agent configuration from a YAML file."""
         script_dir = self._get_script_dir()
@@ -138,21 +144,31 @@ class GoRunner:
     
     def _clean_code_output(self, output) -> str:
         """Clean the code output from the LLM response"""
-        logger.debug(f"Input to clean_code_output:\n{output}")
         if hasattr(output, 'content'):
-            # Handle CrewOutput object
             code = output.content
         else:
-            # Handle string output
             code = str(output)
         
-        # Remove any markdown code block markers
+        # Remove markdown code block markers
         code = code.replace('```go', '').replace('```', '')
         
-        # Remove leading and trailing non code lines
-        # Do nothing, return the code
+        # Remove any markdown bold markers
+        code = code.replace('**', '')
+        
+        # Remove any trailing/leading whitespace
+        code = code.strip()
+        
+        # If the code contains multiple package declarations, take everything after the last one
+        package_splits = code.split('package main')
+        if len(package_splits) > 1:
+            code = 'package main' + package_splits[-1]
+        
+        # Ensure the code starts with package declaration
+        if not code.startswith('package'):
+            logger.warning("Code output missing package declaration")
+            
         return code
-    
+
     def _validate_code(self, code: str) -> bool:
         """Simple validation to check the code is valid go, used before we write to disk"""
         try:

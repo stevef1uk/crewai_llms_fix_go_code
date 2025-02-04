@@ -26,6 +26,12 @@ class TestConfig:
     timeout_seconds: int = 30
     max_iterations: int = 3
     environment: Optional[dict] = None
+    test_working_directory: Optional[str] = None  # Will default to working_directory if not set
+
+    def __post_init__(self):
+        # If test_working_directory not specified, use working_directory
+        if self.test_working_directory is None:
+            self.test_working_directory = self.working_directory
 
 class TestGenerator:
     def __init__(self, config_path: str, llm):
@@ -168,44 +174,226 @@ class TestGenerator:
             logger.error(f"Failed to read package info: {str(e)}")
         return package, module_path
     
+    def _find_test_binaries(self, test_dir: str) -> list[str]:
+        """Find all potential test binaries in the directory"""
+        binaries = []
+        try:
+            for file in os.listdir(test_dir):
+                # Look for any file ending in .test and executable test files
+                if file.endswith('.test') or (file.startswith('test') and os.access(os.path.join(test_dir, file), os.X_OK)):
+                    binaries.append(os.path.join(test_dir, file))
+                    
+            if binaries:
+                logger.debug(f"Found test binaries: {binaries}")
+        except Exception as e:
+            logger.warning(f"Error scanning for test binaries: {e}")
+        return binaries
+
+    def _cleanup_test_binaries(self, test_dir: str) -> None:
+            """Clean up any test binaries found in the directory"""
+            binaries = self._find_test_binaries(test_dir)
+            for binary in binaries:
+                try:
+                    os.remove(binary)
+                    logger.debug(f"Removed test binary: {binary}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove test binary {binary}: {e}")
+
     def _validate_test_code(self, test_path: str) -> bool:
-        source_path = os.path.join(self.config.working_directory, self.config.source_file)
-        test_binary = test_path + ".test"
-        cwd = os.path.dirname(source_path)
+        """Validate the test code and handle dependencies"""
+        test_dir = self.config.test_working_directory
         
         try:
-            with open(source_path, 'r') as f:
-                for line in f:
-                    if line.startswith('package '):
-                        module_name = line.split()[1].strip()
-                        break
-
-            mod_path = os.path.join(cwd, "go.mod")
-            if not os.path.exists(mod_path):
-                init_process = subprocess.run(
-                    ['go', 'mod', 'init', module_name],
-                    capture_output=True,
-                    text=True,
-                    cwd=cwd
-                )
-                if init_process.returncode != 0:
-                    logger.error(f"Failed to initialize go module:\n{init_process.stderr}")
-                    return False
-
-            process = subprocess.run(['go', 'test', '-c'], capture_output=True, text=True, cwd=cwd)
-            if os.path.exists(test_binary):
-                os.remove(test_binary)
+            # Check if we're in a module structure
+            has_module = os.path.exists(os.path.join(test_dir, "go.mod"))
+            
+            # Environment setup
+            env = os.environ.copy()
+            if has_module:
+                env['GO111MODULE'] = 'on'
+                env['GOWORK'] = 'off'
+            else:
+                env['GO111MODULE'] = 'off'
                 
-            return process.returncode == 0
+            # First try to build
+            logger.debug(f"Attempting to build tests in {test_dir}")
+            process = subprocess.run(
+                ['go', 'test', '-c'],
+                capture_output=True,
+                text=True,
+                cwd=test_dir,
+                env=env
+            )
+            
+            if process.returncode != 0:
+                # Check if it's a build error
+                if "[build failed]" in process.stderr or "build failed" in process.stderr:
+                    logger.error(f"Build failed in {test_dir}:\n{process.stderr}")
+                    return False
+                    
+                logger.debug(f"Initial build failed: {process.stderr}")
+                if has_module:
+                    logger.info(f"Attempting to get dependencies in {test_dir}...")
+                    get_deps = subprocess.run(
+                        ['go', 'get', './...'],
+                        capture_output=True,
+                        text=True,
+                        cwd=test_dir,
+                        env=env
+                    )
+                    if get_deps.returncode != 0:
+                        logger.error(f"Failed to get dependencies: {get_deps.stderr}")
+                    
+                    # Try compilation again after getting dependencies
+                    process = subprocess.run(
+                        ['go', 'test', '-c'],
+                        capture_output=True,
+                        text=True,
+                        cwd=test_dir,
+                        env=env
+                    )
+            
+            # Clean up test binary regardless of success/failure
+            self._cleanup_test_binaries(test_dir)
+            
+            if process.returncode != 0:
+                logger.error(f"Test compilation failed in {test_dir}:\n{process.stderr}")
+                return False
+                
+            return True
 
         except Exception as e:
-            logger.error(f"Error validating test code: {str(e)}")
-            if os.path.exists(test_binary):
-                try:
-                    os.remove(test_binary)
-                except Exception:
-                    pass
+            logger.error(f"Error validating test code in {test_dir}: {str(e)}")
+            # Ensure cleanup even on exception
+            self._cleanup_test_binaries(test_dir)
             return False
+
+    def _run_tests(self) -> tuple[bool, str]:
+        """Run the unit tests and capture output"""
+        test_dir = self.config.test_working_directory
+        try:
+            # Check if we're in a module
+            has_module = os.path.exists(os.path.join(test_dir, "go.mod"))
+            logger.debug(f"Module detected: {has_module}")
+            
+            # Environment setup
+            env = os.environ.copy()
+            if has_module:
+                env['GO111MODULE'] = 'on'
+                env['GOWORK'] = 'off'
+            else:
+                env['GO111MODULE'] = 'off'
+            
+            # Run tests
+            logger.debug(f"Executing command: ['go', 'test', '-v'] in directory: {test_dir}")
+            process = subprocess.run(
+                ['go', 'test', '-v'],
+                capture_output=True,
+                text=True,
+                cwd=test_dir,
+                timeout=self.config.timeout_seconds,
+                env=env
+            )
+            
+            # Clean up any test binaries after test run
+            self._cleanup_test_binaries(test_dir)
+            
+            output = process.stdout + process.stderr
+            logger.debug(f"Test execution output:\n{output}")
+            
+            return process.returncode == 0, output
+            
+        except subprocess.TimeoutExpired:
+            self._cleanup_test_binaries(test_dir)  # Clean up on timeout
+            return False, "Test execution timed out"
+        except Exception as e:
+            logger.error(f"Error running tests: {e}", exc_info=True)
+            self._cleanup_test_binaries(test_dir)  # Clean up on error
+            return False, f"Error running tests: {str(e)}"
+            """Validate the test code and handle dependencies"""
+            test_dir = self.config.test_working_directory
+            source_dir = os.path.dirname(os.path.join(self.config.working_directory, self.config.source_file))
+            
+            # Ensure we're testing in the correct directory
+            if source_dir != test_dir:
+                logger.debug(f"Test directory {test_dir} differs from source directory {source_dir}")
+                test_path = os.path.join(test_dir, os.path.basename(test_path))
+            
+            test_binary = test_path + ".test"
+            
+            try:
+                # Check if we're in a module structure
+                has_module = os.path.exists(os.path.join(test_dir, "go.mod"))
+                logger.debug(f"Module detected: {has_module} in {test_dir}")
+                
+                # Environment setup
+                env = os.environ.copy()
+                if has_module:
+                    env['GO111MODULE'] = 'on'
+                    env['GOWORK'] = 'off'
+                else:
+                    env['GO111MODULE'] = 'off'
+                    
+                # First try to build
+                logger.debug(f"Attempting to build tests in {test_dir}")
+                process = subprocess.run(
+                    ['go', 'test', '-c'],
+                    capture_output=True,
+                    text=True,
+                    cwd=test_dir,
+                    env=env
+                )
+                
+                if process.returncode != 0:
+                    # Check if it's a build error
+                    if "[build failed]" in process.stderr or "build failed" in process.stderr:
+                        logger.error(f"Build failed in {test_dir}:\n{process.stderr}")
+                        return False
+                        
+                    logger.debug(f"Initial build failed: {process.stderr}")
+                    if has_module:
+                        logger.info(f"Attempting to get dependencies in {test_dir}...")
+                        get_deps = subprocess.run(
+                            ['go', 'get', './...'],
+                            capture_output=True,
+                            text=True,
+                            cwd=test_dir,
+                            env=env
+                        )
+                        if get_deps.returncode != 0:
+                            logger.error(f"Failed to get dependencies: {get_deps.stderr}")
+                        
+                        # Try compilation again after getting dependencies
+                        process = subprocess.run(
+                            ['go', 'test', '-c'],
+                            capture_output=True,
+                            text=True,
+                            cwd=test_dir,
+                            env=env
+                        )
+                
+                # Clean up test binary
+                if os.path.exists(test_binary):
+                    try:
+                        os.remove(test_binary)
+                        logger.debug(f"Removed test binary: {test_binary}")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove test binary {test_binary}: {e}")
+                
+                if process.returncode != 0:
+                    logger.error(f"Test compilation failed in {test_dir}:\n{process.stderr}")
+                    return False
+                    
+                return True
+
+            except Exception as e:
+                logger.error(f"Error validating test code in {test_dir}: {str(e)}")
+                if os.path.exists(test_binary):
+                    try:
+                        os.remove(test_binary)
+                    except Exception:
+                        pass
+                return False
 
     def _create_test_fixer_task(self, source_code: str, test_code: str, build_errors: str) -> Task:
         """Create a task for fixing test code"""
@@ -287,27 +475,38 @@ class TestGenerator:
         logger.error(f"Failed to fix test code after {self.config.max_iterations} iterations")
         return False
 
-    def _run_tests(self) -> tuple[bool, str]:
-        """Run the unit tests and capture output"""
+    def _check_directory_structure(self):
+        """Debug helper to check directory structure"""
+        test_dir = self.config.test_working_directory
+        logger.debug(f"Checking directory structure in {test_dir}")
+        
         try:
-            process = subprocess.run(
-                ['go', 'test', '-v'],
-                capture_output=True,
-                text=True,
-                cwd=self.config.working_directory,
-                timeout=self.config.timeout_seconds
-            )
-            return process.returncode == 0, process.stdout + process.stderr
-        except subprocess.TimeoutExpired:
-            return False, "Test execution timed out"
+            # List directory contents
+            contents = os.listdir(test_dir)
+            logger.debug(f"Directory contents: {contents}")
+            
+            # Check go.mod
+            go_mod_path = os.path.join(test_dir, "go.mod")
+            if os.path.exists(go_mod_path):
+                with open(go_mod_path, 'r') as f:
+                    logger.debug(f"go.mod contents:\n{f.read()}")
+                    
+            # Check test file
+            test_file = os.path.join(test_dir, os.path.basename(self.config.test_file))
+            if os.path.exists(test_file):
+                with open(test_file, 'r') as f:
+                    logger.debug(f"Test file contents:\n{f.read()}")
+                    
         except Exception as e:
-            return False, f"Error running tests: {str(e)}"
+            logger.error(f"Error checking directory structure: {e}")
 
+   
     def generate_and_run_tests(self) -> bool:
         """Main method to generate and run tests"""
-        # Read source code
+        # Get full source file path
         source_path = os.path.join(self.config.working_directory, self.config.source_file)
-       
+        source_dir = os.path.dirname(source_path)
+        
         try:
             with open(source_path, 'r') as f:
                 source_code = f.read()
@@ -315,12 +514,26 @@ class TestGenerator:
             logger.error(f"Failed to read source file: {str(e)}")
             return False
 
-        # Generate test file name if not specified
-        if not self.config.test_file:
-            base_name = os.path.splitext(self.config.source_file)[0]
-            self.config.test_file = f"{base_name}_test.go"
+        # Generate test file path - keep it in same directory as source
+        if self.config.test_file:
+            test_path = os.path.join(source_dir, os.path.basename(self.config.test_file))
+        else:
+            # Generate test file name from source file
+            base_name = os.path.splitext(os.path.basename(self.config.source_file))[0]
+            test_path = os.path.join(source_dir, f"{base_name}_test.go")
+        
+        logger.debug(f"Source path: {source_path}")
+        logger.debug(f"Test path: {test_path}")
+        logger.debug(f"Working in directory: {source_dir}")
 
-        test_path = os.path.join(self.config.working_directory, self.config.test_file)
+        # Create backup of any existing test file
+        if os.path.exists(test_path):
+            backup_path = test_path + ".bak"
+            try:
+                shutil.copy2(test_path, backup_path)
+                logger.info(f"Created backup of '{test_path}' at '{backup_path}'")
+            except Exception as e:
+                logger.error(f"Failed to create backup of '{test_path}': {e}")
 
         # Generate tests
         generator_task = self._create_test_generator_task(source_code)
@@ -331,17 +544,9 @@ class TestGenerator:
         )
         test_code = self._clean_code_output(crew.kickoff())
 
-        # Create a backup of any existing test file
-        if os.path.exists(test_path):
-            backup_path = test_path + ".bak"
-            try:
-                shutil.copy2(test_path, backup_path)
-                logger.info(f"Created backup of '{test_path}' at '{backup_path}'")
-            except Exception as e:
-                logger.error(f"Failed to create backup of '{test_path}': {e}")
-
         # Write test file
         try:
+            os.makedirs(os.path.dirname(test_path), exist_ok=True)
             with open(test_path, 'w') as f:
                 f.write(test_code)
             logger.info(f"Wrote test code to {test_path}")
@@ -349,14 +554,21 @@ class TestGenerator:
             logger.error(f"Failed to write test file: {str(e)}")
             return False
 
+        # Set working directory for validation and tests
+        self.config.test_working_directory = source_dir
+
         # Validate and fix test code if needed
-        if not self._validate_test_code(test_path):
+        while True:
+            if self._validate_test_code(test_path):
+                break
+                
             logger.info("Generated tests failed to compile, attempting to fix...")
             if not self._fix_code_with_llm(test_path, source_path):
                 logger.error("Failed to fix test code")
                 return False
-
-        # Run tests
+                
+        # Run tests from the source directory
+        logger.debug(f"Running tests in: {source_dir}")
         success, test_output = self._run_tests()
         logger.info(f"Test execution output:\n{test_output}")
 
@@ -371,7 +583,7 @@ class TestGenerator:
         logger.info(f"\nTest Analysis:\n{analysis}")
 
         return success
-
+    
 def main():
     parser = argparse.ArgumentParser(description='Generate and run Go unit tests')
     parser.add_argument('config', help='Path to YAML configuration file')
