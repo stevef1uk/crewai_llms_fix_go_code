@@ -18,15 +18,26 @@ description: |
     5. Use same package as source code
     6. Mock external dependencies when necessary
     7. Have clear test names and descriptions
+    8. Include proper test setup and teardown
+    9. Use mocks for interfaces
+
+    Import rules:
+    1. REQUIRED imports if needed:
+       - "github.com/stretchr/testify/mock" for mocking
+       - "github.com/stretchr/testify/assert" for assertions
+       - "github.com/google/uuid" for UUID handling
+       - Any other external packages used in the source file
+    2. DO NOT import the package under test (use same package name instead)
+    3. Include standard library imports as needed (context, testing, time, etc.)
 
     IMPORTANT: 
     1. Return ONLY the complete Go test code
     2. Do not include any markdown formatting or explanatory text
     3. Use EXACTLY the same package name as the source code
-    4. Import ONLY packages that are actually used in the tests
-    5. Keep test file in the same package as source code
-    6. Remove any backticks or markdown code block markers
-    7. Do not add imports for the package under test
-    8. Remove any unused imports to avoid compilation errors
+    4. Keep test file in the same package as source code
+    5. Include complete mock implementations for interfaces
+    6. Initialize and configure mocks in test setup
+    7. Add comprehensive test cases for all behaviors
+    8. Use proper error checking when testing methods that return errors
 
 expected_output: "Complete Go test code ready to be written to a file"
