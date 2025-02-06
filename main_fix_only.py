@@ -156,9 +156,17 @@ class GoRunner:
     def _validate_code(self, code: str) -> bool:
         """Simple validation to check the code is valid go, used before we write to disk"""
         try:
+            # Check if vendor directory exists
+            vendor_path = os.path.join(self.config.working_directory, "vendor")
+            has_vendor = os.path.exists(vendor_path)
+
             # Initialize the module if it doesn't exist
-            if not os.path.exists(os.path.join(self.config.working_directory,"go.mod")):
-                process = subprocess.Popen(['go', 'mod', 'init', 'temp'],  stderr=subprocess.PIPE, cwd=self.config.working_directory)
+            if not os.path.exists(os.path.join(self.config.working_directory, "go.mod")):
+                process = subprocess.Popen(
+                    ['go', 'mod', 'init', 'temp'],
+                    stderr=subprocess.PIPE,
+                    cwd=self.config.working_directory
+                )
                 _, stderr = process.communicate()
                 if process.returncode != 0:
                     stderr_str = stderr.decode()
@@ -167,25 +175,37 @@ class GoRunner:
                         logger.error(f"Error initializing go module:\n{stderr_str}")
                         return False
 
-            # Build the code
-            process = subprocess.Popen(['go', 'build'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.config.working_directory)
+            # Build the code with appropriate vendor flag if needed
+            build_cmd = ['go', 'build']
+            if has_vendor:
+                build_cmd.append('-mod=vendor')
+
+            process = subprocess.Popen(
+                build_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=self.config.working_directory
+            )
             stdout, stderr = process.communicate(input=code.encode())
+
             if process.returncode != 0:
                 stderr_str = stderr.decode()
                 # Ignore GOSUMDB warnings
                 if not "verifying module: checksum database disabled by GOSUMDB=off" in stderr_str:
                     logger.error(f"Invalid Go code returned:\n{stderr_str}")
                     return False
+
             return True
+
         except Exception as e:
             logger.error(f"Error validating Go code: {str(e)}\n{traceback.format_exc()}")
             return False
-
-
+        
     def _prepare_go_environment(self, env):
-        """Prepares the Go environment by running go mod tidy and go get."""
+        """Prepares the Go environment by running go mod tidy and handling vendor dependencies."""
         try:
-           # Run go mod tidy
+            # Run go mod tidy
             print("Running 'go mod tidy'...")
             result = subprocess.run(
                 ['go', 'mod', 'tidy'],
@@ -198,46 +218,98 @@ class GoRunner:
             logger.info(f"'go mod tidy' output:\n{result.stdout}")
             if result.stderr and "verifying module: checksum database disabled by GOSUMDB=off" not in result.stderr:
                 logger.error(f"'go mod tidy' errors:\n{result.stderr}")
-        
-           # Run go get
-            print("Running 'go get'...")
-            result = subprocess.run(
-                ['go', 'get',  './...'],
-                cwd=self.config.working_directory,
-                check=True,
-                env=env,
-                capture_output=True,
-                text=True
-            )
-            logger.info(f"'go get' output:\n{result.stdout}")
-            if result.stderr:
-                logger.error(f"'go get' errors:\n{result.stderr}")
+
+            # Check if vendor directory exists
+            vendor_path = os.path.join(self.config.working_directory, "vendor")
+            has_vendor = os.path.exists(vendor_path)
+
+            if has_vendor:
+                print("Vendor directory detected, syncing dependencies...")
+                # First, try to download all dependencies
+                download_result = subprocess.run(
+                    ['go', 'mod', 'download', 'all'],
+                    cwd=self.config.working_directory,
+                    check=False,
+                    env=env,
+                    capture_output=True,
+                    text=True
+                )
+                if download_result.returncode != 0:
+                    logger.warning(f"Warning during dependency download:\n{download_result.stderr}")
+
+                # Then vendor them
+                vendor_result = subprocess.run(
+                    ['go', 'mod', 'vendor', '-v'],  # Added -v for verbose output
+                    cwd=self.config.working_directory,
+                    check=False,
+                    env=env,
+                    capture_output=True,
+                    text=True
+                )
+                logger.info(f"'go mod vendor' output:\n{vendor_result.stdout}")
+                if vendor_result.returncode != 0:
+                    logger.error(f"Error during vendoring:\n{vendor_result.stderr}")
+                    # If vendoring fails, try to continue without vendor mode
+                    return False
+
             return True
+
         except subprocess.CalledProcessError as e:
-            logger.error(f"Error during 'go mod tidy' or 'go get':\n{e.stderr}")
+            logger.error(f"Error during Go environment preparation:\n{e.stderr}")
             return False
-            
+ 
     def _build_go_program(self, go_file, env):
-        """Build the go program using go build"""
+        """Build the go program using go build, supporting both vendored and non-vendored projects"""
         temp_executable = "tmp_proj_ignore_me"
         temp_executable_path = os.path.join(self.config.working_directory, temp_executable)
+        
         try:
+            # Check if vendor directory exists
+            vendor_path = os.path.join(self.config.working_directory, "vendor")
+            has_vendor = os.path.exists(vendor_path)
+
+            # Ensure the go_file path is in the correct format
+            if not go_file.startswith('./'):
+                go_file = f"./{go_file}"
+
+            # Prepare build command based on vendor status
+            build_cmd = ['go', 'build']
+            if has_vendor:
+                # First try with strict vendor mode
+                build_cmd.append('-mod=vendor')
+            build_cmd.extend(['-o', temp_executable, go_file])
+
             print(f"Building go program... with file {go_file} in {self.config.working_directory}")
+            print(f"Using build command: {' '.join(build_cmd)}")
+            
             result = subprocess.run(
-                ['go', 'build', '-o', temp_executable, go_file],
+                build_cmd,
                 cwd=self.config.working_directory,
-                check=False,  # Don't raise exception, we'll handle the error
+                check=False,
                 env=env,
                 capture_output=True,
                 text=True
             )
             
+            # If build fails with vendor mode, try with readonly mode
+            if result.returncode != 0 and has_vendor:
+                logger.warning("Build failed with strict vendor mode, attempting with readonly mode")
+                build_cmd[build_cmd.index('-mod=vendor')] = '-mod=readonly'
+                result = subprocess.run(
+                    build_cmd,
+                    cwd=self.config.working_directory,
+                    check=False,
+                    env=env,
+                    capture_output=True,
+                    text=True
+                )
+
             logger.info(f"'go build' output:\n{result.stdout}")
             if result.returncode != 0:
                 logger.error(f"Error during 'go build':\n{result.stderr}")
                 logger.info("Set build ok flag false")
                 return False, temp_executable_path
-                
+            
             logger.info("Go build was ok")
             return True, temp_executable_path
             
@@ -245,6 +317,7 @@ class GoRunner:
             logger.error(f"Error during build: {str(e)}")
             logger.info("Set build ok flag false")
             return False, temp_executable_path
+    
 
     def _run_go_program(self, temp_executable_path, env) -> bool:
       """Runs the go program and checks its output for success or failure"""
@@ -360,11 +433,13 @@ class GoRunner:
         runner_command = "go run " + source_file
         
         # Extract just the go file
-        go_file = os.path.basename(source_file)
+        #go_file = os.path.basename(source_file)
+        # We want to keep the relative path structure, not just the basename
+        go_file = source_file  # Remove the os.path.basename call
         
         # Construct the full path for the source file
         full_source_path = os.path.join(self.config.working_directory, source_file)
-    
+
         # Check that file exists, if not exit
         if not os.path.exists(full_source_path):
             logger.error(f"Source file does not exist: {full_source_path}")
