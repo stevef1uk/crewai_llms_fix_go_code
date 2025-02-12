@@ -6,7 +6,7 @@ import time
 import signal
 import yaml
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union, List, Dict
 import argparse
 import traceback
 import shutil
@@ -17,6 +17,9 @@ from langchain_community.llms import Ollama
 from langchain_openai import ChatOpenAI
 from crewai import Agent, Task, Crew, Process
 import re
+import requests
+from langchain_community.llms import LlamaCpp
+import json
 
 
 # Configure logging
@@ -229,7 +232,7 @@ class GoRunner:
                 download_result = subprocess.run(
                     ['go', 'mod', 'download', 'all'],
                     cwd=self.config.working_directory,
-                    check=False,
+                    check=False,  # Don't fail on download issues
                     env=env,
                     capture_output=True,
                     text=True
@@ -239,9 +242,9 @@ class GoRunner:
 
                 # Then vendor them
                 vendor_result = subprocess.run(
-                    ['go', 'mod', 'vendor', '-v'],  # Added -v for verbose output
+                    ['go', 'mod', 'vendor', '-v'],
                     cwd=self.config.working_directory,
-                    check=False,
+                    check=False,  # Don't fail on vendor issues
                     env=env,
                     capture_output=True,
                     text=True
@@ -250,7 +253,7 @@ class GoRunner:
                 if vendor_result.returncode != 0:
                     logger.error(f"Error during vendoring:\n{vendor_result.stderr}")
                     # If vendoring fails, try to continue without vendor mode
-                    return False
+                    return True  # Continue anyway, will try non-vendor mode
 
             return True
 
@@ -340,10 +343,10 @@ class GoRunner:
                     # Process has ended
                     stdout, stderr = self.process.communicate()
                     if self.process.returncode == 0:
-                        logger.info(f"Process ended with return code: {self.process.returncode}, output:\n {stdout}")
+                        logger.info(f"Process ended with return code: {self.process.returncode}, output:\n{stdout}")
                         return True
                     else:
-                        logger.error(f"Process ended with return code: {self.process.returncode}, output:\n {stdout} \n, errors: \n {stderr}")
+                        logger.error(f"Process ended with return code: {self.process.returncode}, output:\n{stdout}, errors: \n{stderr}")
                     break
                 time.sleep(0.1)
             else:
@@ -352,11 +355,11 @@ class GoRunner:
                  self.terminate()
                  return False 
       except subprocess.CalledProcessError as e:
-        logger.error(f"Error during running program: ")
+        logger.error(f"Error during running program: {e}")
         logger.error(f"Output: {e.output}")
         return False
       except Exception as e:
-          logger.error(f"Error running Go program: ")
+          logger.error(f"Error running Go program: {e}")
           logger.error(f"Error: {e}")
           return False
 
@@ -543,23 +546,62 @@ class GoRunner:
             except ProcessLookupError:
                 print("Process already terminated")
 
+    def _extract_code(self, text: str) -> str:
+        """Extract code from the response, handling both markdown and plain text."""
+        if "</think>" in text:
+            parts = text.split("</think>")
+            text = parts[-1].strip()
+
+        if "```" in text:
+            code_blocks = text.split("```")
+            for i in range(len(code_blocks)-2, -1, -2):
+                if i % 2 == 1:
+                    block = code_blocks[i]
+                    if " " in block.split("\n")[0]:
+                        block = "\n".join(block.split("\n")[1:])
+                    return block.strip()
+        return text.strip()
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python script.py <config.yaml> [--llm <gemini|ollama|openai>] [--ollama-host <host_url>] [--ollama-model <model_name>] [--openai-model <model_name>]")
+        print("Usage: python script.py <config.yaml> [--llm <gemini|ollama|openai|deepseek>] [--ollama-host <host_url>] [--ollama-model <model_name>] [--openai-model <model_name>] [--deepseek-url <url>] [--deepseek-key <key>] [--verbose]")
         sys.exit(1)
     
     parser = argparse.ArgumentParser(description='Debug Go code using AI agents')
     parser.add_argument('config', help='Path to YAML configuration file')
-    parser.add_argument('--llm', choices=['gemini', 'ollama', 'openai'], default='gemini', help='LLM provider to use')
-    parser.add_argument('--ollama-host', default='http://localhost:11434', help='Ollama host URL')
-    parser.add_argument('--ollama-model', default='mistral', help='Ollama model name')
-    parser.add_argument('--openai-model', default='gpt-3.5-turbo', help='OpenAI model name')
+    parser.add_argument('--llm', choices=['gemini', 'ollama', 'openai', 'deepseek'], 
+                       default='gemini', 
+                       help='LLM provider to use')
+    parser.add_argument('--ollama-host', 
+                       default='http://localhost:11434', 
+                       help='Ollama host URL')
+    parser.add_argument('--ollama-model', 
+                       default='mistral', 
+                       help='Ollama model name')
+    parser.add_argument('--openai-model', 
+                       default='gpt-3.5-turbo', 
+                       help='OpenAI model name')
+    parser.add_argument('--deepseek-url', 
+                       default='http://localhost:8080/v1/completions', 
+                       help='DeepSeek API URL')
+    parser.add_argument('--deepseek-key', 
+                       default=os.getenv('DEEPSEEK_KEY'),  # Get from environment variable
+                       help='DeepSeek API Key')
+    parser.add_argument('-v', '--verbose', 
+                       action='count', 
+                       default=0,
+                       help='Increase verbosity (can be used multiple times, e.g., -vv)')
     
     args = parser.parse_args()
     
+    print(f"Current working directory: {os.getcwd()}")
+    print("Loading .env file...")
     load_dotenv()
+    print(f"Environment variables after loading:")
+    print(f"GOOGLE_API_KEY exists: {bool(os.getenv('GOOGLE_API_KEY'))}")
+    print(f"OPENAI_API_KEY exists: {bool(os.getenv('OPENAI_API_KEY'))}")
+    print(f"DEEPSEEK_KEY exists: {bool(os.getenv('DEEPSEEK_KEY'))}")
     
     from crewai.llm import LLM
     
@@ -582,7 +624,24 @@ def main():
             ])
 
         def call(self, prompt: str, **kwargs) -> str:
-            return self.llm.invoke(self.prompt.format_messages(prompt=prompt)).content
+            # Handle CrewAI's message format
+            if isinstance(prompt, dict) and 'messages' in prompt:
+                messages = prompt['messages']
+                # Extract only user messages, ignore system/assistant messages
+                user_messages = []
+                for msg in messages:
+                    if isinstance(msg, dict) and msg.get('role') == 'user':
+                        user_messages.append(msg['content'])
+                prompt = "\n".join(user_messages)
+            elif isinstance(prompt, list):
+                # Handle list of messages similarly
+                user_messages = []
+                for msg in prompt:
+                    if isinstance(msg, dict) and msg.get('role') == 'user':
+                        user_messages.append(msg['content'])
+                prompt = "\n".join(user_messages)
+            
+            return self.llm.invoke(prompt).content
 
     class OllamaLLM(LLM):
         def __init__(self, model, base_url, temperature=0.7, verbose=False):
@@ -590,19 +649,72 @@ def main():
                 model=model,
                 temperature=temperature,
             )
-            self.llm = Ollama(
-                model=model,
-                base_url=base_url,
-                temperature=temperature,
-                verbose=verbose
-            )
+            self.base_url = base_url.rstrip('/')  # Remove trailing slash if present
+            self.model = model
+            self.temperature = temperature
+            self.verbose = verbose
             
-            self.prompt = ChatPromptTemplate.from_messages([
-                ("user", "{prompt}")
-            ])
+            if self.verbose:
+                print(f"Initializing OllamaLLM with model: {model}")
+
+        def _extract_code(self, text: str) -> str:
+            """Extract code from the response, handling both markdown and plain text."""
+            if "</think>" in text:
+                parts = text.split("</think>")
+                text = parts[-1].strip()
+
+            if "```" in text:
+                code_blocks = text.split("```")
+                for i in range(len(code_blocks)-2, -1, -2):
+                    if i % 2 == 1:
+                        block = code_blocks[i]
+                        if " " in block.split("\n")[0]:
+                            block = "\n".join(block.split("\n")[1:])
+                        return block.strip()
+            return text.strip()
 
         def call(self, prompt: str, **kwargs) -> str:
-            return self.llm.invoke(prompt)
+            # Handle CrewAI's message format
+            if isinstance(prompt, dict) and 'messages' in prompt:
+                messages = prompt['messages']
+            elif isinstance(prompt, list):
+                messages = prompt
+            else:
+                messages = [{'role': 'user', 'content': str(prompt)}]
+
+            # Convert messages to a single string
+            full_prompt = ""
+            for msg in messages:
+                if isinstance(msg, dict) and 'content' in msg:
+                    role = msg.get('role', 'user')
+                    content = msg['content']
+                    full_prompt += f"{role}: {content}\n\n"
+
+            if self.verbose:
+                print(f"Sending request to: {self.base_url}/api/generate")
+                
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "model": self.model,
+                    "prompt": full_prompt,
+                    "temperature": self.temperature,
+                    "stream": False
+                }
+            )
+            
+            if self.verbose:
+                print(f"Response status: {response.status_code}")
+                if response.status_code != 200:
+                    print(f"Response text: {response.text}")
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            if 'response' in result:
+                return self._extract_code(result['response'])
+            return ""
 
     class OpenAILLM(LLM):
         def __init__(self, model, temperature=0.7, verbose=False, openai_api_key=None):
@@ -621,7 +733,210 @@ def main():
             ])
 
         def call(self, prompt: str, **kwargs) -> str:
-           return self.llm.invoke(self.prompt.format_messages(prompt=prompt)).content
+            # Handle CrewAI's message format
+            if isinstance(prompt, dict) and 'messages' in prompt:
+                messages = prompt['messages']
+                # Extract only user messages, ignore system/assistant messages
+                user_messages = []
+                for msg in messages:
+                    if isinstance(msg, dict) and msg.get('role') == 'user':
+                        user_messages.append(msg['content'])
+                prompt = "\n".join(user_messages)
+            elif isinstance(prompt, list):
+                # Handle list of messages similarly
+                user_messages = []
+                for msg in prompt:
+                    if isinstance(msg, dict) and msg.get('role') == 'user':
+                        user_messages.append(msg['content'])
+                prompt = "\n".join(user_messages)
+            
+            # Pass the string directly to invoke
+            return self.llm.invoke(prompt).content
+
+    class LlamaCppServerLLM(LLM):
+        def __init__(self, url="http://localhost:8080", temperature=0.7, verbose=False):
+            super().__init__(
+                model="llama-cpp",
+                temperature=temperature
+            )
+            self.url = url
+            self.temperature = temperature
+            self.verbose = verbose
+            self.api_key = "ARun-YvW8Q_V5Q2l6rjMp8WpZM6Ic-y-wp0BUtWOJM0"
+            self._message_buffer = []  # Buffer to store message chunks
+
+        def _send_request(self, prompt_text: str):
+            """Send a single request to the API."""
+            data = {
+                "prompt": prompt_text,
+                "max_tokens": 10000,
+                "temperature": self.temperature,
+                "stream": False
+            }
+
+            if self.verbose:
+                print("\nSending complete request to server:")
+                print(json.dumps(data, indent=2))
+
+            try:
+                response = requests.post(
+                    self.url,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self.api_key}"
+                    },
+                    json=data
+                )
+                
+                if self.verbose:
+                    print(f"Response status: {response.status_code}")
+                
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                print(f"Error in API call: {str(e)}")
+                raise
+
+        def invoke(self, prompt, **kwargs):
+            """Handle chunked messages from CrewAI."""
+            try:
+                # Add the new chunk to our buffer
+                if isinstance(prompt, dict) and 'messages' in prompt:
+                    self._message_buffer.extend(prompt['messages'])
+                elif isinstance(prompt, list):
+                    self._message_buffer.extend(prompt)
+                else:
+                    self._message_buffer.append({
+                        'role': 'user',
+                        'content': str(prompt)
+                    })
+
+                # Check if this is the last chunk (contains main function)
+                is_last_chunk = False
+                for msg in (prompt['messages'] if isinstance(prompt, dict) and 'messages' in prompt else [prompt]):
+                    if isinstance(msg, dict) and 'content' in msg:
+                        if 'func main()' in msg['content']:
+                            is_last_chunk = True
+                            break
+
+                if not is_last_chunk:
+                    # If not the last chunk, just store it and return empty string
+                    return ""
+
+                # If this is the last chunk, process all accumulated messages
+                all_content = []
+                current_role = None
+                current_content = []
+
+                for msg in self._message_buffer:
+                    if isinstance(msg, dict) and 'content' in msg:
+                        if msg.get('role') != current_role:
+                            if current_content:
+                                all_content.append(f"{current_role}: {' '.join(current_content)}")
+                                current_content = []
+                            current_role = msg.get('role')
+                        current_content.append(msg['content'])
+
+                # Add the last role's content
+                if current_content:
+                    all_content.append(f"{current_role}: {' '.join(current_content)}")
+
+                # Create the final prompt
+                final_prompt = "\n\n".join(all_content)
+
+                # Clear the buffer
+                self._message_buffer = []
+
+                # Send the complete prompt
+                response = self._send_request(final_prompt)
+                
+                if 'choices' in response and len(response['choices']) > 0:
+                    return response['choices'][0]['text'].strip()
+                else:
+                    raise ValueError(f"Unexpected response format: {response}")
+
+            except Exception as e:
+                print(f"Error during API call: {str(e)}")
+                self._message_buffer = []  # Clear buffer on error
+                return str(e)
+
+    class DeepSeekLLM(LLM):
+        def __init__(self, model, base_url, temperature=0.7, verbose=False, api_key=None):
+            super().__init__(
+                model=model,
+                temperature=temperature,
+            )
+            self.base_url = base_url
+            self.api_key = api_key
+            self.temperature = temperature
+            self.verbose = verbose
+            
+            print(f"Initializing DeepSeekLLM with API key present: {bool(api_key)}")
+
+        def _extract_code(self, text: str) -> str:
+            """Extract code from the response, handling both markdown and plain text."""
+            if "</think>" in text:
+                parts = text.split("</think>")
+                text = parts[-1].strip()
+
+            if "```" in text:
+                code_blocks = text.split("```")
+                for i in range(len(code_blocks)-2, -1, -2):
+                    if i % 2 == 1:
+                        block = code_blocks[i]
+                        if " " in block.split("\n")[0]:
+                            block = "\n".join(block.split("\n")[1:])
+                        return block.strip()
+            return text.strip()
+
+        def call(self, prompt: str, **kwargs) -> str:
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}"
+            }
+            
+            # Handle CrewAI's message format
+            if isinstance(prompt, dict) and 'messages' in prompt:
+                messages = prompt['messages']
+            elif isinstance(prompt, list):
+                messages = prompt
+            else:
+                messages = [{'role': 'user', 'content': str(prompt)}]
+
+            # Convert messages to a single string
+            full_prompt = ""
+            for msg in messages:
+                if isinstance(msg, dict) and 'content' in msg:
+                    role = msg.get('role', 'user')
+                    content = msg['content']
+                    full_prompt += f"{role}: {content}\n\n"
+
+            if self.verbose:
+                print(f"Sending request to: {self.base_url}")
+                
+            response = requests.post(
+                self.base_url,
+                headers=headers,
+                json={
+                    "model": "llama2",
+                    "prompt": full_prompt,
+                    "max_tokens": 10000,
+                    "temperature": self.temperature,
+                    "stream": False
+                }
+            )
+            
+            if self.verbose:
+                print(f"Response status: {response.status_code}")
+                if response.status_code != 200:
+                    print(f"Response text: {response.text}")
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            if 'choices' in result and len(result['choices']) > 0:
+                return self._extract_code(result['choices'][0]['text'].strip())
+            return ""
 
     if args.llm == 'gemini':
         llm = GeminiLLM(
@@ -631,9 +946,24 @@ def main():
             google_api_key=os.getenv('GOOGLE_API_KEY')
         )
     elif args.llm == 'ollama':
+        ollama_host = args.ollama_host or "http://localhost:11434"
+        print(f"Connecting to Ollama at: {ollama_host}")
+        
+        # Verify Ollama is running
+        try:
+            response = requests.get(f"{ollama_host}/api/version")
+            if response.status_code != 200:
+                print(f"Error: Cannot connect to Ollama at {ollama_host}")
+                print("Please ensure Ollama is running and the host URL is correct")
+                sys.exit(1)
+        except requests.exceptions.ConnectionError:
+            print(f"Error: Cannot connect to Ollama at {ollama_host}")
+            print("Please ensure Ollama is running and the host URL is correct")
+            sys.exit(1)
+            
         llm = OllamaLLM(
             model=args.ollama_model,
-            base_url=args.ollama_host,
+            base_url=ollama_host,
             temperature=0.99,
             verbose=True
         )
@@ -643,6 +973,19 @@ def main():
             temperature=0.99,
             verbose=True,
             openai_api_key=os.getenv('OPENAI_API_KEY')
+        )
+    elif args.llm == 'deepseek':
+        deepseek_key = os.getenv('DEEPSEEK_KEY')  # Get the key directly from environment
+        if not deepseek_key:  # Check the actual key value, not args.deepseek_key
+            print("Error: DEEPSEEK_KEY environment variable is not set")
+            sys.exit(1)
+            
+        llm = DeepSeekLLM(
+            model='llama2',
+            base_url=args.deepseek_url,
+            temperature=0.99,
+            verbose=True,
+            api_key=deepseek_key  # Use the key we just got from environment
         )
     else:
         raise ValueError(f"Invalid LLM provider: {args.llm}")
