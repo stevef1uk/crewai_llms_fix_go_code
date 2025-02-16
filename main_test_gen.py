@@ -67,7 +67,7 @@ class GroqLLM(LLM):
 
         chat_completion = self.client.chat.completions.create(
             messages=messages,
-            model=self.model,  # Use the clean model name without prefix
+            model=self.model,
             temperature=self.temperature
         )
         
@@ -787,9 +787,21 @@ def force_groq_provider(model: str):
 litellm.get_llm_provider = force_groq_provider
 
 def main():
+    if len(sys.argv) < 2:
+        print("Usage: python script.py <config.yaml> [--llm <gemini|ollama|openai|deepseek|groq>]"
+              " [--ollama-host <host_url>] [--ollama-model <model_name>]"
+              " [--openai-model <model_name>] [--deepseek-url <url>]"
+              " [--deepseek-key <key>] [--groq-model <model>]"
+              "\n\nGroq models available:"
+              "\n  - mixtral-8x7b-32768"
+              "\n  - llama-3.3-70b-versatile (default)"
+              "\n  - deepseek-r1-distill-llama-70b"
+              "\n\nUse --verbose for more detailed output")
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(description='Generate and run Go unit tests')
     parser.add_argument('config', help='Path to YAML configuration file')
-    parser.add_argument('--llm', choices=['gemini', 'ollama', 'openai', 'deepseek', 'groq'], 
+    parser.add_argument('--llm', choices=['gemini', 'ollama', 'openai', 'groq'], 
                        default='gemini',
                        help='LLM provider to use')
     parser.add_argument('--groq-model', 
@@ -947,19 +959,6 @@ def main():
             temperature=0.99,
             verbose=args.verbose >= 1,
             openai_api_key=openai_key
-        )
-    elif args.llm == 'deepseek':
-        deepseek_key = os.getenv('DEEPSEEK_KEY')
-        if not deepseek_key:
-            print("Error: DEEPSEEK_KEY environment variable is not set")
-            sys.exit(1)
-            
-        llm = DeepSeekLLM(
-            model='llama2',
-            base_url=args.deepseek_url,
-            temperature=0.99,
-            verbose=args.verbose >= 1,
-            api_key=deepseek_key
         )
     elif args.llm == 'groq':
         groq_key = os.getenv('GROQ_API_KEY')

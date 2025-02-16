@@ -20,6 +20,7 @@ import re
 import requests
 from langchain_community.llms import LlamaCpp
 import json
+from groq import Groq  # Add this import at the top
 
 
 # Configure logging
@@ -565,14 +566,28 @@ class GoRunner:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python script.py <config.yaml> [--llm <gemini|ollama|openai|deepseek>] [--ollama-host <host_url>] [--ollama-model <model_name>] [--openai-model <model_name>] [--deepseek-url <url>] [--deepseek-key <key>] [--verbose]")
+        print("Usage: python script.py <config.yaml> [--llm <gemini|ollama|openai|deepseek|groq>]"
+              " [--ollama-host <host_url>] [--ollama-model <model_name>]"
+              " [--openai-model <model_name>] [--deepseek-url <url>]"
+              " [--deepseek-key <key>] [--groq-model <model>]"
+              "\n\nGroq models available:"
+              "\n  - mixtral-8x7b-32768"
+              "\n  - llama-3.3-70b-versatile (default)"
+              "\n  - deepseek-r1-distill-llama-70b"
+              "\n\nUse --verbose for more detailed output")
         sys.exit(1)
     
-    parser = argparse.ArgumentParser(description='Debug Go code using AI agents')
+    parser = argparse.ArgumentParser(description='Fix Go code issues')
     parser.add_argument('config', help='Path to YAML configuration file')
-    parser.add_argument('--llm', choices=['gemini', 'ollama', 'openai', 'deepseek'], 
-                       default='gemini', 
+    parser.add_argument('--llm', choices=['gemini', 'ollama', 'openai', 'deepseek', 'groq'], 
+                       default='gemini',
                        help='LLM provider to use')
+    parser.add_argument('--groq-model', 
+                       default='llama-3.3-70b-versatile', 
+                       choices=['mixtral-8x7b-32768', 
+                               'llama-3.3-70b-versatile',
+                               'deepseek-r1-distill-llama-70b'],
+                       help='Groq model name')
     parser.add_argument('--ollama-host', 
                        default='http://localhost:11434', 
                        help='Ollama host URL')
@@ -602,6 +617,7 @@ def main():
     print(f"GOOGLE_API_KEY exists: {bool(os.getenv('GOOGLE_API_KEY'))}")
     print(f"OPENAI_API_KEY exists: {bool(os.getenv('OPENAI_API_KEY'))}")
     print(f"DEEPSEEK_KEY exists: {bool(os.getenv('DEEPSEEK_KEY'))}")
+    print(f"GROQ_API_KEY exists: {bool(os.getenv('GROQ_API_KEY'))}")
     
     from crewai.llm import LLM
     
@@ -938,6 +954,40 @@ def main():
                 return self._extract_code(result['choices'][0]['text'].strip())
             return ""
 
+    class GroqLLM(LLM):
+        def __init__(self, model, temperature=0.7, verbose=False, groq_api_key=None):
+            super().__init__(
+                model=model,
+                temperature=temperature
+            )
+            if verbose:
+                print(f"Initializing GroqLLM with model: {model}")
+            
+            self.client = Groq(api_key=groq_api_key)
+            self.model = model
+            self.temperature = temperature
+            self.verbose = verbose
+
+        def call(self, prompt: str, **kwargs) -> str:
+            if self.verbose:
+                print(f"Calling Groq API with model: {self.model}")
+            
+            # Handle CrewAI's message format
+            if isinstance(prompt, dict) and 'messages' in prompt:
+                messages = prompt['messages']
+            elif isinstance(prompt, list):
+                messages = prompt
+            else:
+                messages = [{"role": "user", "content": str(prompt)}]
+
+            chat_completion = self.client.chat.completions.create(
+                messages=messages,
+                model=self.model,
+                temperature=self.temperature
+            )
+            
+            return chat_completion.choices[0].message.content
+
     if args.llm == 'gemini':
         llm = GeminiLLM(
             model='models/gemini-pro',
@@ -986,6 +1036,18 @@ def main():
             temperature=0.99,
             verbose=True,
             api_key=deepseek_key  # Use the key we just got from environment
+        )
+    elif args.llm == 'groq':
+        groq_key = os.getenv('GROQ_API_KEY')
+        if not groq_key:
+            print("Error: GROQ_API_KEY environment variable is not set")
+            sys.exit(1)
+            
+        llm = GroqLLM(
+            model=args.groq_model,
+            temperature=0.99,
+            verbose=args.verbose >= 1,
+            groq_api_key=groq_key
         )
     else:
         raise ValueError(f"Invalid LLM provider: {args.llm}")
