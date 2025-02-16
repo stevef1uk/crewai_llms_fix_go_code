@@ -793,9 +793,8 @@ def main():
                        default='gemini',
                        help='LLM provider to use')
     parser.add_argument('--groq-model', 
-                       default='llama2-70b-4096', 
+                       default='llama-3.3-70b-versatile', 
                        choices=['mixtral-8x7b-32768', 
-                               'llama2-70b-4096',
                                'llama-3.3-70b-versatile',
                                'deepseek-r1-distill-llama-70b'],
                        help='Groq model name')
