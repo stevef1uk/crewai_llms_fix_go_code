@@ -13,6 +13,12 @@ from langchain_community.llms import Ollama
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 import shutil
+import requests
+from groq import Groq
+from abc import ABC, abstractmethod
+import litellm
+from litellm.litellm_core_utils import get_llm_provider_logic
+from crewai.llm import LLM
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -32,6 +38,98 @@ class TestConfig:
         # If test_working_directory not specified, use working_directory
         if self.test_working_directory is None:
             self.test_working_directory = self.working_directory
+
+class GroqLLM(LLM):
+    def __init__(self, model, temperature=0.7, verbose=False, groq_api_key=None):
+        super().__init__(
+            model=model,
+            temperature=temperature
+        )
+        if verbose:
+            print(f"Initializing GroqLLM with model: {model}")
+            
+        self.client = Groq(api_key=groq_api_key)
+        self.model = model.replace('groq/', '')  # Remove any 'groq/' prefix
+        self.temperature = temperature
+        self.verbose = verbose
+
+    def call(self, prompt: str, **kwargs) -> str:
+        if self.verbose:
+            print(f"Calling Groq API with model: {self.model}")
+            
+        # Handle CrewAI's message format
+        if isinstance(prompt, dict) and 'messages' in prompt:
+            messages = prompt['messages']
+        elif isinstance(prompt, list):
+            messages = prompt
+        else:
+            messages = [{"role": "user", "content": str(prompt)}]
+
+        chat_completion = self.client.chat.completions.create(
+            messages=messages,
+            model=self.model,  # Use the clean model name without prefix
+            temperature=self.temperature
+        )
+        
+        return chat_completion.choices[0].message.content
+
+class GeminiLLM(LLM):
+    def __init__(self, model, temperature, google_api_key, verbose=False):
+        super().__init__(
+            model=model,
+            temperature=temperature
+        )
+        if verbose:
+            print(f"Initializing GeminiLLM with model: {model}")
+            
+        self.llm = ChatGoogleGenerativeAI(
+            model=model,
+            verbose=verbose,
+            temperature=temperature,
+            google_api_key=google_api_key
+        )
+        self.prompt = ChatPromptTemplate.from_messages([("user", "{prompt}")])
+        self.verbose = verbose
+
+    def call(self, prompt: str, **kwargs) -> str:
+        if self.verbose:
+            print(f"Calling Gemini LLM with prompt: {prompt}")
+            
+        # Handle CrewAI's message format
+        if isinstance(prompt, dict) and 'messages' in prompt:
+            messages = prompt['messages']
+            # Convert messages to a single string
+            prompt = "\n".join([m['content'] for m in messages])
+        elif isinstance(prompt, list):
+            # Convert list of messages to a single string
+            prompt = "\n".join([m['content'] for m in prompt])
+            
+        response = self.llm.invoke(self.prompt.format_messages(prompt=prompt)).content
+        
+        if self.verbose:
+            print(f"Gemini LLM response: {response}")
+            
+        return response
+
+class OpenAILLM(LLM):
+    def __init__(self, model, temperature=0.7, verbose=False, openai_api_key=None):
+        super().__init__(
+            model=model,
+            temperature=temperature
+        )
+        self.llm = ChatOpenAI(
+            model=model,
+            temperature=temperature,
+            verbose=verbose,
+            openai_api_key=openai_api_key,
+        )
+        self.prompt = ChatPromptTemplate.from_messages([("user", "{prompt}")])
+
+    def call(self, prompt: str, **kwargs) -> str:
+        logger.debug(f"Calling OpenAI LLM with prompt: {prompt}")
+        response = self.llm.invoke(self.prompt.format_messages(prompt=prompt)).content
+        logger.debug(f"OpenAI LLM response: {response}")
+        return response
 
 class TestGenerator:
     def __init__(self, config_path: str, llm):
@@ -152,28 +250,24 @@ class TestGenerator:
     def _clean_code_output(self, output) -> str:
         """Clean the code output from the LLM response"""
         if hasattr(output, 'content'):
+            # Handle CrewOutput object
             code = output.content
         else:
+            # Handle string output
             code = str(output)
         
-        code = code.replace('```go', '').replace('```', '')
+        # Extract only the Go code block if multiple blocks exist
+        if "```go" in code:
+            blocks = code.split("```go")
+            if len(blocks) > 1:
+                code = blocks[1].split("```")[0]
+        
+        # Remove any remaining markdown code block markers
+        code = code.replace('```go', '').replace('```bash', '').replace('```plaintext', '').replace('```', '')
+        
+        # Remove leading and trailing whitespace
         return code.strip()
-        package = "main"
-        module_path = "local"
-        try:
-            with open(source_path, 'r') as f:
-                content = f.read()
-                # Extract package
-                for line in content.split('\n'):
-                    if line.strip().startswith('package '):
-                        package = line.split()[1].strip()
-                        break
-                # Use package name as module path
-                module_path = package if package != "main" else "local"
-        except Exception as e:
-            logger.error(f"Failed to read package info: {str(e)}")
-        return package, module_path
-    
+
     def _find_test_binaries(self, test_dir: str) -> list[str]:
         """Find all potential test binaries in the directory"""
         binaries = []
@@ -267,7 +361,6 @@ class TestGenerator:
             logger.error(f"Error validating test code: {str(e)}")
             return False
     
-
     def _run_tests(self) -> tuple[bool, str]:
         """Run the test code and capture both success/failure and output"""
         try:
@@ -565,6 +658,11 @@ class TestGenerator:
             logger.error(f"Failed to write test file: {str(e)}")
             return False
 
+        # Handle dependencies before validation
+        if not self._handle_dependencies(source_dir):
+            logger.error("Failed to handle dependencies")
+            return False
+
         # Set working directory for validation and tests
         self.config.test_working_directory = source_dir
 
@@ -595,17 +693,106 @@ class TestGenerator:
 
         return success
     
+    def _handle_dependencies(self, test_dir: str) -> bool:
+        """Handle external package dependencies considering vendor directory"""
+        try:
+            logger.info("Handling test dependencies...")
+            
+            # Check if vendor directory exists
+            vendor_path = os.path.join(test_dir, "vendor")
+            has_vendor = os.path.exists(vendor_path)
+            logger.debug(f"Vendor directory exists: {has_vendor}")
+            
+            # Set up environment
+            env = os.environ.copy()
+            if has_vendor:
+                env['GOFLAGS'] = '-mod=vendor'
+                logger.info("Using vendored dependencies")
+            else:
+                env['GOFLAGS'] = '-mod=mod'
+                logger.info("Using module dependencies")
+
+            # First run go mod tidy
+            tidy_cmd = ['go', 'mod', 'tidy']
+            logger.debug(f"Running: {' '.join(tidy_cmd)}")
+            tidy_result = subprocess.run(
+                tidy_cmd,
+                cwd=test_dir,
+                env=env,
+                capture_output=True,
+                text=True
+            )
+            if tidy_result.returncode != 0:
+                logger.error(f"go mod tidy failed:\n{tidy_result.stderr}")
+                return False
+
+            if has_vendor:
+                # If using vendor, sync the vendor directory
+                vendor_cmd = ['go', 'mod', 'vendor']
+                logger.debug(f"Running: {' '.join(vendor_cmd)}")
+                vendor_result = subprocess.run(
+                    vendor_cmd,
+                    cwd=test_dir,
+                    env=env,
+                    capture_output=True,
+                    text=True
+                )
+                if vendor_result.returncode != 0:
+                    logger.error(f"go mod vendor failed:\n{vendor_result.stderr}")
+                    return False
+            else:
+                # If not using vendor, download dependencies
+                get_cmd = ['go', 'get', 'github.com/stretchr/testify/assert']
+                logger.debug(f"Running: {' '.join(get_cmd)}")
+                get_result = subprocess.run(
+                    get_cmd,
+                    cwd=test_dir,
+                    env=env,
+                    capture_output=True,
+                    text=True
+                )
+                if get_result.returncode != 0:
+                    logger.error(f"go get failed:\n{get_result.stderr}")
+                    return False
+
+            logger.info("Dependencies handled successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error handling dependencies: {str(e)}")
+            return False
+
+def force_groq_provider(model: str):
+    return "groq", None, None, None
+
+# Patch litellm.get_llm_provider
+litellm.get_llm_provider = force_groq_provider
+
 def main():
     parser = argparse.ArgumentParser(description='Generate and run Go unit tests')
     parser.add_argument('config', help='Path to YAML configuration file')
-    parser.add_argument('--llm', choices=['gemini', 'ollama', 'openai'], default='gemini',
-                      help='LLM provider to use')
+    parser.add_argument('--llm', choices=['gemini', 'ollama', 'openai', 'deepseek', 'groq'], 
+                       default='gemini',
+                       help='LLM provider to use')
+    parser.add_argument('--groq-model', 
+                       default='llama2-70b-4096', 
+                       choices=['mixtral-8x7b-32768', 
+                               'llama2-70b-4096',
+                               'llama-3.3-70b-versatile',
+                               'deepseek-r1-distill-llama-70b'],
+                       help='Groq model name')
     parser.add_argument('--ollama-host', default='http://localhost:11434',
                       help='Ollama host URL')
     parser.add_argument('--ollama-model', default='mistral',
                       help='Ollama model name')
     parser.add_argument('--openai-model', default='gpt-3.5-turbo',
                       help='OpenAI model name')
+    parser.add_argument('--deepseek-url', 
+                      default='http://localhost:8080/v1/completions',
+                      help='DeepSeek API URL')
+    parser.add_argument('--deepseek-key', 
+                      default=os.getenv('DEEPSEEK_KEY'),  # Get from environment variable
+                      help='DeepSeek API Key')
     parser.add_argument('-v', '--verbose', action='count', default=0,
                       help='Increase verbosity (can be used multiple times, e.g., -vv)')
     
@@ -632,76 +819,98 @@ def main():
         for handler in logging.getLogger().handlers:
             handler.setFormatter(formatter)
 
-    from crewai.llm import LLM
-    
-    class GeminiLLM(LLM):
-        def __init__(self, model, temperature, google_api_key, verbose=False):
-            super().__init__(
-                model=model,
-                api_key=google_api_key,
-                temperature=temperature,
-            )
-            self.llm = ChatGoogleGenerativeAI(
-                model=model,
-                verbose=verbose,
-                temperature=temperature,
-                google_api_key=google_api_key
-            )
-            self.prompt = ChatPromptTemplate.from_messages([("user", "{prompt}")])
-
-        def call(self, prompt: str, **kwargs) -> str:
-            logger.debug(f"Calling Gemini LLM with prompt: {prompt}")
-            response = self.llm.invoke(self.prompt.format_messages(prompt=prompt)).content
-            logger.debug(f"Gemini LLM response: {response}")
-            return response
-
-    class OllamaLLM(LLM):
-        def __init__(self, model, base_url, temperature=0.7, verbose=False):
+    # Add DeepSeek LLM class
+    class DeepSeekLLM(LLM):
+        def __init__(self, model, base_url, temperature=0.7, verbose=False, api_key=None):
             super().__init__(
                 model=model,
                 temperature=temperature,
             )
-            self.llm = Ollama(
-                model=model,
-                base_url=base_url,
-                temperature=temperature,
-                verbose=verbose
-            )
-            self.prompt = ChatPromptTemplate.from_messages([("user", "{prompt}")])
+            self.base_url = base_url
+            self.api_key = api_key
+            self.temperature = temperature
+            self.verbose = verbose
+            
+            if verbose:
+                print(f"Initializing DeepSeekLLM with API key present: {bool(api_key)}")
+
+        def _extract_code(self, text: str) -> str:
+            """Extract code from the response, handling both markdown and plain text."""
+            if "</think>" in text:
+                parts = text.split("</think>")
+                text = parts[-1].strip()
+
+            if "```" in text:
+                code_blocks = text.split("```")
+                for i in range(len(code_blocks)-2, -1, -2):
+                    if i % 2 == 1:
+                        block = code_blocks[i]
+                        if " " in block.split("\n")[0]:
+                            block = "\n".join(block.split("\n")[1:])
+                        return block.strip()
+            return text.strip()
 
         def call(self, prompt: str, **kwargs) -> str:
-            logger.debug(f"Calling Ollama LLM with prompt: {prompt}")
-            response = self.llm.invoke(prompt)
-            logger.debug(f"Ollama LLM response: {response}")
-            return response
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}"
+            }
+                
+            # Handle CrewAI's message format
+            if isinstance(prompt, dict) and 'messages' in prompt:
+                messages = prompt['messages']
+            elif isinstance(prompt, list):
+                messages = prompt
+            else:
+                messages = [{'role': 'user', 'content': str(prompt)}]
 
-    class OpenAILLM(LLM):
-        def __init__(self, model, temperature=0.7, verbose=False, openai_api_key=None):
-            super().__init__(
-                model=model,
-                temperature=temperature
-            )
-            self.llm = ChatOpenAI(
-                model=model,
-                temperature=temperature,
-                verbose=verbose,
-                openai_api_key=openai_api_key,
-            )
-            self.prompt = ChatPromptTemplate.from_messages([("user", "{prompt}")])
+            # Convert messages to a single string
+            full_prompt = ""
+            for msg in messages:
+                if isinstance(msg, dict) and 'content' in msg:
+                    role = msg.get('role', 'user')
+                    content = msg['content']
+                    full_prompt += f"{role}: {content}\n\n"
 
-        def call(self, prompt: str, **kwargs) -> str:
-            logger.debug(f"Calling OpenAI LLM with prompt: {prompt}")
-            response = self.llm.invoke(self.prompt.format_messages(prompt=prompt)).content
-            logger.debug(f"OpenAI LLM response: {response}")
-            return response
+            if self.verbose:
+                logger.debug(f"Sending request to: {self.base_url}")
+                
+            response = requests.post(
+                self.base_url,
+                headers=headers,
+                json={
+                    "model": "llama2",
+                    "prompt": full_prompt,
+                    "max_tokens": 10000,
+                    "temperature": self.temperature,
+                    "stream": False
+                }
+            )
+            
+            if self.verbose:
+                logger.debug(f"Response status: {response.status_code}")
+                if response.status_code != 200:
+                    logger.debug(f"Response text: {response.text}")
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            if 'choices' in result and len(result['choices']) > 0:
+                return self._extract_code(result['choices'][0]['text'].strip())
+            return ""
 
     # Initialize appropriate LLM based on args
     if args.llm == 'gemini':
+        google_key = os.getenv('GOOGLE_API_KEY')
+        if not google_key:
+            print("Error: GOOGLE_API_KEY environment variable is not set")
+            sys.exit(1)
+            
         llm = GeminiLLM(
-            model='models/gemini-pro',
+            model='gemini-pro',
             verbose=args.verbose >= 1,
             temperature=0.99,
-            google_api_key=os.getenv('GOOGLE_API_KEY')
+            google_api_key=google_key
         )
     elif args.llm == 'ollama':
         llm = OllamaLLM(
@@ -711,11 +920,41 @@ def main():
             verbose=args.verbose >= 1
         )
     elif args.llm == 'openai':
+        openai_key = os.getenv('OPENAI_API_KEY')
+        if not openai_key:
+            print("Error: OPENAI_API_KEY environment variable is not set")
+            sys.exit(1)
+            
         llm = OpenAILLM(
             model=args.openai_model,
             temperature=0.99,
             verbose=args.verbose >= 1,
-            openai_api_key=os.getenv('OPENAI_API_KEY')
+            openai_api_key=openai_key
+        )
+    elif args.llm == 'deepseek':
+        deepseek_key = os.getenv('DEEPSEEK_KEY')
+        if not deepseek_key:
+            print("Error: DEEPSEEK_KEY environment variable is not set")
+            sys.exit(1)
+            
+        llm = DeepSeekLLM(
+            model='llama2',
+            base_url=args.deepseek_url,
+            temperature=0.99,
+            verbose=args.verbose >= 1,
+            api_key=deepseek_key
+        )
+    elif args.llm == 'groq':
+        groq_key = os.getenv('GROQ_API_KEY')
+        if not groq_key:
+            print("Error: GROQ_API_KEY environment variable is not set")
+            sys.exit(1)
+            
+        llm = GroqLLM(
+            model=args.groq_model,
+            temperature=0.99,
+            verbose=args.verbose >= 1,
+            groq_api_key=groq_key
         )
     else:
         raise ValueError(f"Invalid LLM provider: {args.llm}")
