@@ -117,6 +117,9 @@ class OpenAILLM(LLM):
             model=model,
             temperature=temperature
         )
+        if verbose:
+            print(f"Initializing OpenAI LLM with model: {model}")
+            
         self.llm = ChatOpenAI(
             model=model,
             temperature=temperature,
@@ -124,11 +127,26 @@ class OpenAILLM(LLM):
             openai_api_key=openai_api_key,
         )
         self.prompt = ChatPromptTemplate.from_messages([("user", "{prompt}")])
+        self.verbose = verbose
 
     def call(self, prompt: str, **kwargs) -> str:
-        logger.debug(f"Calling OpenAI LLM with prompt: {prompt}")
+        if self.verbose:
+            print(f"Calling OpenAI LLM with prompt: {prompt}")
+            
+        # Handle CrewAI's message format
+        if isinstance(prompt, dict) and 'messages' in prompt:
+            messages = prompt['messages']
+            # Convert messages to a single string
+            prompt = "\n".join([m['content'] for m in messages])
+        elif isinstance(prompt, list):
+            # Convert list of messages to a single string
+            prompt = "\n".join([m['content'] for m in prompt])
+            
         response = self.llm.invoke(self.prompt.format_messages(prompt=prompt)).content
-        logger.debug(f"OpenAI LLM response: {response}")
+        
+        if self.verbose:
+            print(f"OpenAI LLM response: {response}")
+            
         return response
 
 class TestGenerator:
