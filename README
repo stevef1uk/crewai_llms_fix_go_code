@@ -13,6 +13,7 @@ You will need to create a .env file containing the keys needed for the two Found
 GOOGLE_API_KEY="<your key>"
 OPENAI_API_KEY="<your key>"
 DEEPSEEK_KEY="<your key>"
+GROQ_API_KEY="<your key>"
 
 NOTE: The DEEPSEEK_KEY is just for a self-hosted version of Deepseek R1 run via llama.cpp
 
@@ -38,6 +39,9 @@ python main_fix_only.py --llm openai --openai-model gpt-3.5-turbo examples/confi
 
 To use self-hosted Deepseek use:
 python main_fix_only.py --llm deepseek --deepseek-url http://127.0.0.1:8080/v1/completions  examples/config_simple.yaml
+
+To use Groq use:
+python main_fix_only.py --llm groq --groq-model deepseek-r1-distill-llama-70b examples/config_simple.yaml
 
 The initial Go code should be ok so the LLMs won't be called. Edit the code that has been configured to be repaired and see what happens.
 

@@ -7,4 +7,4 @@ langchain-community
 langchain-experimental
 langchain-openai
 python-dotenv
-
+groq
