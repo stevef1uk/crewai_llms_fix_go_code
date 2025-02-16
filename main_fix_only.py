@@ -565,21 +565,9 @@ class GoRunner:
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python script.py <config.yaml> [--llm <gemini|ollama|openai|deepseek|groq>]"
-              " [--ollama-host <host_url>] [--ollama-model <model_name>]"
-              " [--openai-model <model_name>] [--deepseek-url <url>]"
-              " [--deepseek-key <key>] [--groq-model <model>]"
-              "\n\nGroq models available:"
-              "\n  - mixtral-8x7b-32768"
-              "\n  - llama-3.3-70b-versatile (default)"
-              "\n  - deepseek-r1-distill-llama-70b"
-              "\n\nUse --verbose for more detailed output")
-        sys.exit(1)
-    
     parser = argparse.ArgumentParser(description='Fix Go code issues')
-    parser.add_argument('config', help='Path to YAML configuration file')
-    parser.add_argument('--llm', choices=['gemini', 'ollama', 'openai', 'deepseek', 'groq'], 
+    parser.add_argument('config', nargs='?', help='Path to YAML configuration file')
+    parser.add_argument('-llm', '--llm', choices=['gemini', 'ollama', 'openai', 'deepseek', 'groq'], 
                        default='gemini',
                        help='LLM provider to use')
     parser.add_argument('--groq-model', 
@@ -588,27 +576,21 @@ def main():
                                'llama-3.3-70b-versatile',
                                'deepseek-r1-distill-llama-70b'],
                        help='Groq model name')
-    parser.add_argument('--ollama-host', 
-                       default='http://localhost:11434', 
-                       help='Ollama host URL')
-    parser.add_argument('--ollama-model', 
-                       default='mistral', 
-                       help='Ollama model name')
-    parser.add_argument('--openai-model', 
-                       default='gpt-3.5-turbo', 
-                       help='OpenAI model name')
-    parser.add_argument('--deepseek-url', 
-                       default='http://localhost:8080/v1/completions', 
-                       help='DeepSeek API URL')
-    parser.add_argument('--deepseek-key', 
-                       default=os.getenv('DEEPSEEK_KEY'),  # Get from environment variable
-                       help='DeepSeek API Key')
-    parser.add_argument('-v', '--verbose', 
-                       action='count', 
-                       default=0,
-                       help='Increase verbosity (can be used multiple times, e.g., -vv)')
+    parser.add_argument('--ollama-host', default='http://localhost:11434', help='Ollama host URL')
+    parser.add_argument('--ollama-model', default='mistral', help='Ollama model name')
+    parser.add_argument('--openai-model', default='gpt-3.5-turbo', help='OpenAI model name')
+    parser.add_argument('--deepseek-url', help='DeepSeek API URL')
+    parser.add_argument('--deepseek-key', help='DeepSeek API key')
+    parser.add_argument('-v', '--verbose', action='count', default=0,
+                       help='Increase verbosity level (use -v, -vv, or -vvv)')
     
     args = parser.parse_args()
+    
+    # Check if config is provided after parsing other args
+    if not args.config:
+        print("Usage: python script.py [-llm <gemini|ollama|openai|deepseek|groq>]"
+              " [--groq-model <model>] [-v|-vv|-vvv] <config.yaml>")
+        sys.exit(1)
     
     print(f"Current working directory: {os.getcwd()}")
     print("Loading .env file...")
